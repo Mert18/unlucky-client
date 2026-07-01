@@ -1,8 +1,8 @@
 "use client";
 import LoginOrRegister from "@/components/auth/LoginOrRegister";
-import BackgroundSVGs from "@/components/common/BackgroundSVGs";
 import Loader from "@/components/common/Loader";
 import LogoWithText from "@/components/common/logo/LogoWithText";
+import HeroPanel, { HeroPanelMessage } from "@/components/home/HeroPanel";
 import { useSession } from "next-auth/react";
 import { Jersey_10 } from "next/font/google";
 import { useRouter } from "next/navigation";
@@ -11,34 +11,61 @@ import { Client } from "@stomp/stompjs";
 
 const font = Jersey_10({ subsets: ["latin"], weight: "400" });
 
+const MAX_PANEL_MESSAGES = 20;
+// How long a card stays visible (must match the CSS animation duration below)
+const CARD_LIFETIME_MS = 10000;
+
+function formatTime(iso: string): string {
+  try {
+    return new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+  } catch {
+    return iso;
+  }
+}
+
+function PanelMessageCard({ msg }: { msg: HeroPanelMessage }) {
+  return (
+    <div>
+      <p className="text-white text-2xl leading-snug font-semibold">{msg.sentence}</p>
+      <p className="text-white/50 text-sm mt-1 tracking-wide">{formatTime(msg.timestamp)}</p>
+    </div>
+  );
+}
+
 function Home() {
   const { status } = useSession();
   const router = useRouter();
   const publicClientRef = useRef<Client | null>(null);
-  const [announcements, setAnnouncements] = useState<any[]>([]);
+  const panelCounterRef = useRef(0);
 
-  // Public WebSocket connection for announcements
+  // Two independent message streams — fed round-robin from /topic/live-activity
+  const [panel1Messages, setPanel1Messages] = useState<HeroPanelMessage[]>([]);
+  const [panel2Messages, setPanel2Messages] = useState<HeroPanelMessage[]>([]);
+
+  // Public WebSocket connection
   useEffect(() => {
     const client = new Client({
-      brokerURL: `ws://localhost:8080/ws-public/websocket`,
-      debug: (str) => console.log(str),
+      brokerURL: `${process.env.NEXT_PUBLIC_BACKEND_URI?.replace(/^http/, "ws")}/ws-public/websocket`,
       reconnectDelay: 5000,
       onConnect: () => {
         console.log("Connected to public websocket");
 
-        // Subscribe to announcements
-        client.subscribe('/topic/announcements', (message) => {
-          const announcement = JSON.parse(message.body);
-          console.log(`[${announcement.type}] ${announcement.title}: ${announcement.message}`);
-          const announcementWithId = {
-            ...announcement,
-            id: Date.now() + Math.random(), // Unique ID for animations
+        client.subscribe("/topic/live-activity", (frame) => {
+          const raw = JSON.parse(frame.body);
+          const id = Date.now() + Math.random();
+          const msg: HeroPanelMessage = { ...raw, id };
+          const slot = panelCounterRef.current % 2;
+          panelCounterRef.current++;
+
+          // Helper: add msg to a setter and schedule its removal after the card lifetime
+          const addTo = (setter: React.Dispatch<React.SetStateAction<HeroPanelMessage[]>>) => {
+            setter((prev) => [...prev, msg].slice(-MAX_PANEL_MESSAGES));
+            setTimeout(() => setter((prev) => prev.filter((m) => m.id !== id)), CARD_LIFETIME_MS + 100);
           };
-          setAnnouncements((prev) => {
-            const updated = [...prev, announcementWithId];
-            // Keep only last 3
-            return updated.slice(-3);
-          });
+
+          // Alternate messages between left and right panels
+          if (slot === 0) addTo(setPanel1Messages);
+          else addTo(setPanel2Messages);
         });
       },
       onStompError: (frame) => {
@@ -72,70 +99,59 @@ function Home() {
   } else {
     return (
       <div className={`${font.className} w-full min-h-screen overflow-y-auto bg-white scroll-smooth`}>
-        <BackgroundSVGs />
-
         {/* Hero Section */}
-        <section className="relative min-h-screen flex items-center justify-center bg-linear-primary">
-          <div className="container mx-auto px-6 py-20 text-center relative z-10">
-            {/* Announcements Display */}
-            <div className="max-w-md mx-auto mb-8 min-h-[100px] flex flex-col justify-end">
-              {announcements.map((announcement, index) => {
-                const isNewest = index === announcements.length - 1;
-                return (
-                  <div
-                    key={announcement.id}
-                    className="mb-3 last:mb-0"
-                    style={{
-                      animation: isNewest ? `slideUpFadeIn 0.5s ease-out forwards` : 'none',
-                    }}
-                  >
-                    <div className="bg-white bg-opacity-10 backdrop-blur-sm border border-white border-opacity-20 rounded-lg p-3">
-                      <div className="flex items-start justify-between">
-                        <div className="flex-1">
-                          <div className="flex items-center gap-2 mb-1">
-                            <span className="text-secondary font-bold text-xs uppercase">
-                              {announcement.type}
-                            </span>
-                          </div>
-                          <h4 className="text-white font-semibold text-base mb-1">
-                            {announcement.title}
-                          </h4>
-                          <p className="text-white text-sm opacity-90">
-                            {announcement.message}
-                          </p>
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
+        <section className="relative min-h-screen overflow-hidden bg-primary-dark">
 
-            <div className="mb-8">
-              <LogoWithText />
-            </div>
+          {/* ── Split panel background ───────────────────────────────────────
+              Desktop: 3 equal columns, each streaming live WS messages.
+              Mobile:  single column (panels 2 & 3 hidden).
+          ─────────────────────────────────────────────────────────────────── */}
+          <div className="absolute inset-0 flex">
+            {/* Left panel */}
+            <HeroPanel
+              messages={panel1Messages}
+              renderMessage={(msg) => <PanelMessageCard msg={msg} />}
+            />
 
-            <h1 className="text-5xl md:text-7xl font-bold text-white mb-6">
-              Predict. Compete. Win.
-            </h1>
-            <p className="text-2xl md:text-3xl text-white mb-8 max-w-3xl mx-auto opacity-90">
-              Create prediction games with friends, make your guesses on future events,
-              and climb the leaderboard as outcomes unfold.
-            </p>
+            {/* Right panel */}
+            <HeroPanel
+              messages={panel2Messages}
+              renderMessage={(msg) => <PanelMessageCard msg={msg} />}
+            />
+          </div>
 
-            <div className="flex flex-col sm:flex-row gap-4 justify-center items-center mb-12">
-              <a
-                href="#get-started"
-                className="px-10 py-4 bg-secondary text-white text-lg rounded-lg font-semibold hover:opacity-90 transition-opacity"
-              >
-                Get Started
-              </a>
-              <a
-                href="#how-it-works"
-                className="px-10 py-4 bg-white bg-opacity-20 text-white text-lg rounded-lg font-semibold hover:bg-opacity-30 transition-all backdrop-blur-sm"
-              >
-                Learn More
-              </a>
+          {/* Overlay — dims the panels so the headline stays readable */}
+          <div className="absolute inset-0 bg-primary-darker/60 z-[1]" />
+
+          {/* ── Foreground content ───────────────────────────────────────────── */}
+          <div className="relative z-[2] flex items-center justify-center min-h-screen">
+            <div className="container mx-auto px-6 py-20 text-center">
+              <div className="mb-8">
+                <LogoWithText />
+              </div>
+
+              <h1 className="text-5xl md:text-7xl font-bold text-white mb-6">
+                Predict. Compete. Win.
+              </h1>
+              <p className="text-2xl md:text-3xl text-white mb-8 max-w-3xl mx-auto opacity-90">
+                Create prediction games with friends, make your guesses on future events,
+                and climb the leaderboard as outcomes unfold.
+              </p>
+
+              <div className="flex flex-col sm:flex-row gap-4 justify-center items-center mb-12">
+                <a
+                  href="#get-started"
+                  className="px-10 py-4 bg-secondary text-white text-lg rounded-lg font-semibold hover:opacity-90 transition-opacity"
+                >
+                  Get Started
+                </a>
+                <a
+                  href="#how-it-works"
+                  className="px-10 py-4 bg-white bg-opacity-20 text-white text-lg rounded-lg font-semibold hover:bg-opacity-30 transition-all backdrop-blur-sm"
+                >
+                  Learn More
+                </a>
+              </div>
             </div>
           </div>
         </section>
@@ -315,15 +331,11 @@ function Home() {
         </section>
 
         <style jsx>{`
-          @keyframes slideUpFadeIn {
-            from {
-              opacity: 0;
-              transform: translateY(30px);
-            }
-            to {
-              opacity: 1;
-              transform: translateY(0);
-            }
+          @keyframes floatUp {
+            0%   { opacity: 0; transform: translateY(40px); }
+            12%  { opacity: 1; transform: translateY(0);    }
+            80%  { opacity: 1; transform: translateY(-50px); }
+            100% { opacity: 0; transform: translateY(-70px); }
           }
         `}</style>
       </div>
